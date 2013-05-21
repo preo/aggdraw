@@ -13,7 +13,10 @@
 #
 
 from distutils.core import setup, Extension
-import os, sys
+from distutils.command.build_ext import build_ext
+from distutils import sysconfig
+
+import os, sys, struct, string, re
 
 VERSION = "1.2a3-20060212"
 
@@ -29,11 +32,7 @@ with the WCK renderer.
 """
 
 # pointer to freetype build directory (tweak as necessary)
-FREETYPE_ROOT = "../../kits/freetype-2.1.10"
-
-if not os.path.isdir(FREETYPE_ROOT):
-    print "===", "freetype not available (edit setup.py to enable)"
-    FREETYPE_ROOT = None
+FREETYPE_ROOT = None
 
 sources = [
     # source code currently used by aggdraw
@@ -50,25 +49,9 @@ sources = [
     ]
 
 defines = []
-
 include_dirs = ["agg2/include"]
 library_dirs = []
-
 libraries = []
-
-if FREETYPE_ROOT:
-    defines.append(("HAVE_FREETYPE2", None))
-    sources.extend([
-        "agg2/font_freetype/agg_font_freetype.cpp",
-        ])
-    include_dirs.append("agg2/font_freetype")
-    include_dirs.append(os.path.join(FREETYPE_ROOT, "include"))
-    include_dirs.append(os.path.join(FREETYPE_ROOT, "include/freetype2"))
-    library_dirs.append(os.path.join(FREETYPE_ROOT, "lib"))
-    libraries.append("freetype")
-
-if sys.platform == "win32":
-    libraries.extend(["kernel32", "user32", "gdi32"])
 
 try:
     # add necessary to distutils (for backwards compatibility)
@@ -79,9 +62,168 @@ try:
 except:
     pass
 
+def add_directory(path, dir, where=None):
+    if dir and os.path.isdir(dir) and dir not in path:
+        if where is None:
+            path.append(dir)
+        else:
+            path.insert(where, dir)
+
+def find_include_file(self, include):
+    for directory in self.compiler.include_dirs:
+        if os.path.isfile(os.path.join(directory, include)):
+            return True
+    return False
+
+def find_library_file(self, library):
+    return self.compiler.find_library_file(self.compiler.library_dirs, library)
+
+def find_version(filename):
+    for line in open(filename).readlines():
+        m = re.search("VERSION\s*=\s*\"([^\"]+)\"", line)
+        if m:
+            return m.group(1)
+    return None
+
+class agg_build_ext(build_ext):
+    def build_extensions(self):
+        #
+        # add platform directories
+
+        if sys.platform == "cygwin":
+            # pythonX.Y.dll.a is in the /usr/lib/pythonX.Y/config directory
+            add_directory(library_dirs, os.path.join(
+                "/usr/lib", "python%s" % sys.version[:3], "config"
+                ))
+
+        elif sys.platform == "darwin":
+            # attempt to make sure we pick freetype2 over other versions
+            add_directory(include_dirs, "/sw/include/freetype2")
+            add_directory(include_dirs, "/sw/lib/freetype2/include")
+            # fink installation directories
+            add_directory(library_dirs, "/sw/lib")
+            add_directory(include_dirs, "/sw/include")
+            # darwin ports installation directories
+            add_directory(library_dirs, "/opt/local/lib")
+            add_directory(include_dirs, "/opt/local/include")
+
+        add_directory(library_dirs, "/usr/local/lib")
+        # FIXME: check /opt/stuff directories here?
+
+        prefix = sysconfig.get_config_var("prefix")
+        if prefix:
+            add_directory(library_dirs, os.path.join(prefix, "lib"))
+            add_directory(include_dirs, os.path.join(prefix, "include"))
+
+        #
+        # add configured kits
+        if isinstance(FREETYPE_ROOT, tuple):
+            lib_root, include_root = FREETYPE_ROOT
+        else:
+            lib_root = include_root = FREETYPE_ROOT
+        add_directory(library_dirs, lib_root)
+        add_directory(include_dirs, include_root)
+
+        #
+        # add standard directories
+        # standard locations
+        add_directory(library_dirs, "/usr/local/lib")
+        add_directory(include_dirs, "/usr/local/include")
+
+        add_directory(library_dirs, "/usr/lib")
+        add_directory(include_dirs, "/usr/include")
+
+        #
+        # insert new dirs *before* default libs, to avoid conflicts
+        # between Python PYD stub libs and real libraries
+
+        self.compiler.library_dirs = library_dirs + self.compiler.library_dirs
+        self.compiler.include_dirs = include_dirs + self.compiler.include_dirs
+
+        #
+        # look for available libraries
+
+        class feature:
+            freetype = None
+        feature = feature()
+
+        if find_library_file(self, "freetype"):
+            # look for freetype2 include files
+            freetype_version = 0
+            for dir in self.compiler.include_dirs:
+                if os.path.isfile(os.path.join(dir, "ft2build.h")):
+                    freetype_version = 21
+                    dir = os.path.join(dir, "freetype2")
+                    break
+                dir = os.path.join(dir, "freetype2")
+                if os.path.isfile(os.path.join(dir, "ft2build.h")):
+                    freetype_version = 21
+                    break
+                if os.path.isdir(os.path.join(dir, "freetype")):
+                    freetype_version = 20
+                    break
+            if freetype_version:
+                feature.freetype = "freetype"
+                feature.freetype_version = freetype_version
+                if dir:
+                    add_directory(self.compiler.include_dirs, dir, 0)
+
+        libs = []
+        if sys.platform == "win32":
+            libs.extend(["kernel32", "user32", "gdi32"])
+        if struct.unpack("h", "\0\1")[0] == 1:
+            defines.append(("WORDS_BIGENDIAN", None))
+
+        #
+        # additional libraries
+        if feature.freetype:
+            sources.append("agg2/font_freetype/agg_font_freetype.cpp")
+            include_dirs.append("agg2/font_freetype")
+            libraries.append("freetype")
+
+            defines.append(("HAVE_FREETYPE2", None))
+            if feature.freetype_version == 20:
+                defines.append(("USE_FREETYPE_2_0", None))
+        build_ext.build_extensions(self)
+
+        #
+        # sanity and security checks
+        self.summary_report(feature)
+
+    def summary_report(self, feature):
+
+        print "-" * 68
+        print "AGGDRAW", VERSION, "SETUP SUMMARY"
+        print "-" * 68
+        print "version      ", VERSION
+        v = string.split(sys.version, "[")
+        print "platform     ", sys.platform, string.strip(v[0])
+        for v in v[1:]:
+            print "             ", string.strip("[" + v)
+        print "-" * 68
+
+        options = [
+            (feature.freetype, "FREETYPE2"),
+            ]
+
+        all = True
+        for option in options:
+            if option[0]:
+                print "---", option[1], "support available"
+            else:
+                print "***", option[1], "support not available",
+                print
+                all = False
+
+        if not all:
+            print "To add a missing option, make sure you have the required"
+            print "library, and set the corresponding ROOT variable in the"
+            print "setup.py script."
+            print
+
+        print "To check the build, run the selftest.py script."
 
 setup(
-
     name="aggdraw",
     version=VERSION,
     author="Fredrik Lundh",
@@ -91,6 +233,7 @@ setup(
         # "Development Status :: 5 - Production/Stable",
         "Topic :: Multimedia :: Graphics",
         ],
+    cmdclass = {"build_ext": agg_build_ext},
     description=SUMMARY,
     download_url="http://www.effbot.org/downloads#aggdraw",
     license="Python (MIT style)",
@@ -104,5 +247,4 @@ setup(
                   library_dirs=library_dirs, libraries=libraries
                   )
         ]
-
     )
