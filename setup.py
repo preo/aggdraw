@@ -15,6 +15,7 @@
 from distutils.core import setup, Extension
 from distutils.command.build_ext import build_ext
 from distutils import sysconfig
+import platform as plat
 
 import os, sys, struct, string, re
 
@@ -93,8 +94,7 @@ class agg_build_ext(build_ext):
         if sys.platform == "cygwin":
             # pythonX.Y.dll.a is in the /usr/lib/pythonX.Y/config directory
             add_directory(library_dirs, os.path.join(
-                "/usr/lib", "python%s" % sys.version[:3], "config"
-                ))
+                "/usr/lib", "python%s" % sys.version[:3], "config"))
 
         elif sys.platform == "darwin":
             # attempt to make sure we pick freetype2 over other versions
@@ -106,9 +106,44 @@ class agg_build_ext(build_ext):
             # darwin ports installation directories
             add_directory(library_dirs, "/opt/local/lib")
             add_directory(include_dirs, "/opt/local/include")
+            # freetype2 ships with X11
+            add_directory(library_dirs, "/usr/X11/lib")
+            add_directory(include_dirs, "/usr/X11/include")
+            # if homebrew is installed, use its lib and include directories
+            import subprocess
+            try:
+                prefix = subprocess.check_output(['brew', '--prefix'])
+                if prefix:
+                    prefix = prefix.strip()
+                    add_directory(library_dirs, os.path.join(prefix, 'lib'))
+                    add_directory(include_dirs, os.path.join(prefix, 'include'))
+            except:
+                pass # homebrew not installed
+
+        elif sys.platform.startswith("linux"):
+            for platform_ in (plat.processor(), plat.architecture()[0]):
+
+                if not platform_:
+                    continue
+
+                if platform_ in ["x86_64", "64bit"]:
+                    add_directory(library_dirs, "/lib64")
+                    add_directory(library_dirs, "/usr/lib64")
+                    add_directory(library_dirs, "/usr/lib/x86_64-linux-gnu")
+                    break
+                elif platform_ in ["i386", "i686", "32bit"]:
+                    add_directory(library_dirs, "/usr/lib/i386-linux-gnu")
+                    break
+            else:
+                raise ValueError(
+                    "Unable to identify Linux platform: `%s`" % platform_)
+
+            # XXX Kludge. Above /\ we brute force support multiarch. Here we
+            # try Barry's more general approach. Afterward, something should
+            # work ;-)
+            self.add_multiarch_paths()
 
         add_directory(library_dirs, "/usr/local/lib")
-        # FIXME: check /opt/stuff directories here?
 
         prefix = sysconfig.get_config_var("prefix")
         if prefix:
@@ -222,6 +257,32 @@ class agg_build_ext(build_ext):
             print
 
         print "To check the build, run the selftest.py script."
+
+
+    # http://hg.python.org/users/barry/rev/7e8deab93d5a
+    def add_multiarch_paths(self):
+        # Debian/Ubuntu multiarch support.
+        # https://wiki.ubuntu.com/MultiarchSpec
+        # self.build_temp
+        tmpfile = os.path.join(self.build_temp, 'multiarch')
+        if not os.path.exists(self.build_temp):
+            os.makedirs(self.build_temp)
+        ret = os.system(
+            'dpkg-architecture -qDEB_HOST_MULTIARCH > %s 2> /dev/null' %
+            tmpfile)
+        try:
+            if ret >> 8 == 0:
+                fp = open(tmpfile, 'r')
+                multiarch_path_component = fp.readline().strip()
+                add_directory(
+                    self.compiler.library_dirs,
+                    '/usr/lib/' + multiarch_path_component)
+                add_directory(
+                    self.compiler.include_dirs,
+                    '/usr/include/' + multiarch_path_component)
+        finally:
+            os.unlink(tmpfile)
+
 
 setup(
     name="aggdraw",
