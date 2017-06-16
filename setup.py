@@ -19,7 +19,7 @@ import platform as plat
 
 import os, sys, struct, string, re
 
-VERSION = "1.2a4"
+VERSION = "1.2a5"
 
 SUMMARY="High quality drawing interface for PIL."
 
